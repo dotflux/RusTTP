@@ -4,10 +4,12 @@ mod handlers;
 mod http;
 mod websockets;
 mod middlewares;
+mod ratelimit;
 
 use std::net::{TcpListener, TcpStream};
 use std::io::{Read, Write};
 use std::collections::HashMap;
+use std::sync::{Arc};
 
 use threadpool::ThreadPool;
 use crate::http::HttpRequest;
@@ -15,6 +17,7 @@ use router::Router;
 use handlers::{hello_handler,home_handler,signup_handler,login_handler};
 use websockets::{websocket_handshake,read_frame,send_frame};
 use middlewares::{require_auth};
+use ratelimit::RateLimiter;
 
 
 fn parse_request(buffer:&[u8]) -> HttpRequest {
@@ -46,6 +49,9 @@ fn handle_connection(mut stream:TcpStream,router:&Router){
 
     let req = parse_request(&buffer[..bytes_read]);
 
+    let limiter = Arc::new(RateLimiter::new(5,10));
+
+
     // If websocket
 
     if let Some(upgrade) = req.headers.get("Upgrade") {
@@ -54,6 +60,10 @@ fn handle_connection(mut stream:TcpStream,router:&Router){
                 if req.path != "/" {
                     return;
                 }
+                let username = match req.get_cookie("user") {
+                    Some(u) => u,
+                    None => return,
+                };
                 // Middleware
                 if let Err(resp) = require_auth(&req) {
                     stream.write(resp.as_bytes()).unwrap();
@@ -64,6 +74,10 @@ fn handle_connection(mut stream:TcpStream,router:&Router){
 
                 loop {
                     if let Some(msg) = websockets::read_frame(&mut stream) {
+                        if !limiter.check(&username) {
+                            websockets::send_frame(&mut stream, "Rate limit exceeded");
+                            continue;
+                        }
                         println!("Received WS message: {}", msg);
 
                         websockets::send_frame(&mut stream, &msg);
